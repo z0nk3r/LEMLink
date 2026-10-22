@@ -1,0 +1,7 @@
+#include "resource.h"
+
+STRINGTABLE
+{
+    IDS_INFO "LEMLINK:\r\n\r\nLets an external control panel drive the Project Apollo (NASSP) Lunar Module. Cockpit controls are read and set by their NASSP item name over UDP port 8060, so a physical switch on the panel moves the matching switch in the LM.\r\n\r\nDoes nothing on its own: it waits for a bridge to connect. Harmless to leave enabled when no panel is attached, and inactive in any scenario without an LM.\r\n\r\nPart of the OpenLEM project (LEMLink)."
+    IDS_TYPE "Tools and dialogs"
+}

@@ -1,0 +1,24 @@
+Vendored headers match github.com/CaptainSwag101/NASSP at
+96b6380943c382a297f969842be9344ef969a6f4 (branch CMake), the commit behind
+release NASSP-V9.0-Orbiter2024-47, published 2026-05-30 17:35 UTC. This fork's
+CMake branch is where the x64 builds for Orbiter 2024 come from.
+
+Every file in this directory is identical to its src_sys/ original at that
+commit, line endings aside (stored LF; NASSP ships CRLF).
+
+Keep the release's own LEM.dll beside a patched build, so a NASSP bug can be
+told from one of ours by swapping it back:
+
+    Modules/ProjectApollo/LEM.dll.ci-x64-47
+    sha256  ae17b790bb8349ec...  (the release zip's, unmodified)
+
+The fork's .github/workflows/build.yml is the build recipe: CMake,
+Visual Studio 17 2022, -A x64, RelWithDebInfo, configured from
+Orbitersdk/samples/ProjectApollo/ against the Orbiter 2024 x64 release.
+
+These files are UNMODIFIED. Do not edit them - the whole point is that the
+plugin sees exactly the declarations NASSP was compiled against. To move to a
+newer NASSP, re-vendor at the matching revision and rebuild; a mismatch here
+does not fail to compile, it corrupts memory at runtime.
+
+Only connector.cpp is compiled. The rest are headers it pulls in.

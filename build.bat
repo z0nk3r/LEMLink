@@ -69,7 +69,7 @@ cl /nologo /LD /EHsc /O2 /MD /W3 ^
    /link /OUT:build\LEMLink.dll ^
    build\LEMLink.res ^
    "%SDK%\lib\Orbiter.lib" "%SDK%\lib\Orbitersdk.lib" ^
-   ws2_32.lib iphlpapi.lib user32.lib gdi32.lib
+   ws2_32.lib user32.lib gdi32.lib
 
 if errorlevel 1 (
   echo.

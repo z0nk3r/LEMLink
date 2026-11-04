@@ -22,7 +22,7 @@
  */
 enum LMDDMessageType
 {
-	LMDD_GET_CW_LIGHT,        /* one caution/warning light, by row and column */
+	LMDD_GET_CW_LIGHT,        /* not answered any more; holds the ordinals below */
 	LMDD_GET_CW_LIGHT_ROW,    /* a whole row of eight, packed two bits each */
 	LMDD_GET_MISSION_TIMER,   /* mission timer, seconds */
 	LMDD_GET_EVENT_TIMER,     /* event timer, seconds */
@@ -52,13 +52,11 @@ enum LMDDMessageType
 	 * lighting knob). The panel connector's int SetState() rounds, which
 	 * gave a pit pot 9 settings. The one write in this connector: a knob is
 	 * a control, not a display, so nothing overwrites it next timestep.
-	 *   SET: val1.pValue in the knob's registered name, val3.dValue in the
-	 *        value (clamped by the knob, as a mouse drag is).
-	 *   GET: val1.pValue in the name.
-	 * Both: val1.dValue out the knob's value after the call, val2.bValue
-	 * out false if no continuous knob has that name. */
+	 *   val1.pValue in the knob's registered name, val3.dValue in the value
+	 *   (clamped by the knob, as a mouse drag is), val1.dValue out the knob's
+	 *   value after the call, val2.bValue out false if no continuous knob has
+	 *   that name. */
 	LMDD_SET_KNOB,
-	LMDD_GET_KNOB,
 };
 
 /*

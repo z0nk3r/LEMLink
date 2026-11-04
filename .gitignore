@@ -13,6 +13,3 @@ __pycache__/
 
 .DS_Store
 ~*.*
-
-# Outside-view research and the D3D9Client patches: local, not released.
-screens/

@@ -12,8 +12,8 @@ mv <orbiter>/msvcp140*.dll <orbiter>/_crt_stash/
 cd <orbiter> && WINEPREFIX=~/.wine-orbiter wine Orbiter.exe -s "<scenario>"
 ```
 
-`run_nassp.sh` does all of this and refuses to start while the stashed DLLs
-are back in place. `Orbiter.exe -s <scn>` launches a scenario directly, and
+Once the prefix is set up, `run_nassp.sh` does the last line and refuses to
+start while the stashed DLLs are back in place. `Orbiter.exe -s <scn>` launches a scenario directly, and
 `-S` launches one and exits when it closes. Without either, the launchpad
 opens. Orbiter 2024 and its NASSP are x86-64, which matters because Wine 10 is
 wow64-only and cannot run the 32-bit 2016 line.

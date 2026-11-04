@@ -6,7 +6,6 @@ UDP, so a physical switch moves the matching switch in the LM.
 
 **Sister repos:**
 * [LEMBridge](https://github.com/z0nk3r/LEMBridge): the bridge and mapper that talk to this plugin.
-  Its `docs/PROTOCOL.md` has every verb.
 * [OpenLEM](https://github.com/z0nk3r/OpenLEM): the hardware.
 
 All three sit side by side in one workspace folder, with `cache/`, `runs/` and
@@ -19,6 +18,8 @@ LEMLink
 ├── LEMLink.cpp, LEMLink.rc, resource.h   the plugin (one file, plus its launchpad strings)
 ├── build.bat                             builds build\LEMLink.dll with MSVC on the Windows box
 ├── run_nassp.sh                          launches Orbiter + NASSP under Wine, set up correctly
+├── test_wire.py                          every verb against a running sim, both ways it can answer
+├── docs/PROTOCOL.md                      every verb and what it answers
 ├── docs/WINE.md                          the Wine recipe and its traps
 ├── vendor/                               NASSP headers + connector.cpp at the pinned revision;
 │   └── REVISION                          which revision, and why it is load-bearing
@@ -34,19 +35,24 @@ LEMLink
 UDP 8060 on the machine running Orbiter:
 
 ```
-S <item> <value> [1]   set (1 = hold, for a spring-loaded switch)  -> "K <item> <value>" or "E <item>"
-G <item>               read                                        -> "V <item> <value>", -1 for no such item
-P                      ping                                        -> "A <vessel>" or "A -"
+S <item> <state> [1]   set (1 = hold, for a spring-loaded switch)
+K <item> <value>       set a continuous knob
+G <item>               read
+P                      protocol, LEM.dll state, sim time and vessel
 ```
 
-LEMLink listens on every interface. Its on-screen note names one address:
-the IPv4 address on the machine's lowest-numbered interface that is up (the
-built-in NIC, not a phone tether or VM bridge added later). Set
-`LEMLINK_ADDRESS` in Orbiter's environment to show a different one.
+Every reply starts with its request: `G Foo = 1`, or `G Foo ! no-item` when it
+fails. `docs/PROTOCOL.md` has every verb.
+
+LEMLink listens on this machine only (127.0.0.1), because whoever reaches the
+socket can move every switch in the LM. For a bridge on another machine, set
+`LEMLINK_ADDRESS` in Orbiter's environment to the address to listen on
+(`0.0.0.0` for all of them). The on-screen note shows that address, or
+`BIND FAILED` if the port could not be opened.
 
 The patched `LEM.dll` adds read-only display verbs: C&W, lamps, meters,
-FDAIs, X-pointers, tapes, DSKY, DEDA, timers and lighting. They are listed in
-LEMBridge's `docs/PROTOCOL.md`. On a stock DLL they answer `E no-display`.
+FDAIs, X-pointers, tapes, DSKY, DEDA, timers and lighting. On a stock DLL they
+answer `! no-display`.
 
 ## Building
 

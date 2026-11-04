@@ -102,15 +102,6 @@ bool LEMDisplayDataConnector::ReceiveMessage(Connector *from, ConnectorMessage &
 
 	switch (messageType)
 	{
-	case LMDD_GET_CW_LIGHT:
-		//
-		// val1 in: row. val2 in: column. val1 out: 0 unlit, 1 lit,
-		// 2 no such light.
-		//
-		m.val1.iValue = OurVessel->CWEA.GetCWLightStatus(m.val1.iValue,
-		                                                 m.val2.iValue);
-		return true;
-
 	case LMDD_GET_CW_LIGHT_ROW:
 		//
 		// val1 in: row. val1 out: the row's eight lights, two bits each,
@@ -141,7 +132,6 @@ bool LEMDisplayDataConnector::ReceiveMessage(Connector *from, ConnectorMessage &
 		return true;
 
 	case LMDD_SET_KNOB:
-	case LMDD_GET_KNOB:
 		//
 		// A continuous knob at full resolution (lmdd_types.h). Through the
 		// same SwitchTo() a mouse drag uses, so the clamp, the click sound
@@ -151,7 +141,7 @@ bool LEMDisplayDataConnector::ReceiveMessage(Connector *from, ConnectorMessage &
 			ContinuousSwitch *knob = OurVessel->MainPanel.GetContinuousByName(
 			                             static_cast<char *>(m.val1.pValue));
 			m.val2.bValue = (knob != 0);
-			if (knob && messageType == LMDD_SET_KNOB)
+			if (knob)
 			{
 				knob->SetDisplayValue(m.val3.dValue);
 			}

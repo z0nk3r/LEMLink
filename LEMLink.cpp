@@ -38,7 +38,7 @@
 #define WIN32_LEAN_AND_MEAN
 #include <winsock2.h>
 #include <ws2tcpip.h>
-#include <iphlpapi.h>
+#include <stdarg.h>
 #include <stdlib.h>
 
 #include "Orbitersdk.h"
@@ -53,7 +53,8 @@
  * LM displays that are not panel items - the caution and warning lights, the
  * timers, and meter readings. Declared here rather than included, so this
  * builds against stock NASSP: an unpatched LM simply registers no connector of
- * this type, GetConnector() returns NULL, and the display verbs answer "E".
+ * this type, GetConnector() returns NULL, and the display verbs answer
+ * "! no-display".
  *
  * The value must match the patched enum. It is appended at the end there for
  * exactly this reason - an ordinal that moves would silently address the wrong
@@ -104,7 +105,7 @@
 class PanelClient : public Connector
 {
 public:
-    PanelClient() : peer(NULL) { type = MFD_PANEL_INTERFACE; }
+    PanelClient() : peer(NULL), logged(false) { type = MFD_PANEL_INTERFACE; }
 
     /**
      * The vessel's panel connector, held WITHOUT calling ConnectTo().
@@ -124,6 +125,13 @@ public:
      * mutated on NASSP's side by holding this pointer.
      */
     Connector *peer;
+
+    /**
+     * A refusal is logged once a session. EnsureConnected() comes here for
+     * every command until the LM connects, so a refusing LM would otherwise
+     * write several lines per request, at the bridge's polling rate.
+     */
+    bool logged;
 
     /**
      * @return true if @p v is a Project Apollo vessel that answered.
@@ -153,21 +161,25 @@ public:
                 valid ? "true" : "FALSE",
                 (unsigned)sizeof(VESSEL4),
                 (unsigned)sizeof(ProjectApolloConnectorVessel));
-        oapiWriteLog(msg);
+        const auto log = [this](const char *text) {
+            if (!logged)
+            {
+                oapiWriteLog((char *)text);
+            }
+        };
+        log(msg);
 
         if (!valid)
         {
-            oapiWriteLog((char *)"LEMLink: layout mismatch - this plugin "
-                                 "and LEM.dll disagree on the class. Check "
-                                 "the Orbiter SDK version and vendor/REVISION.");
+            log("LEMLink: layout mismatch - this plugin and LEM.dll disagree "
+                "on the class. Check the Orbiter SDK version and vendor/REVISION.");
             return false;
         }
 
         peer = pacv->GetConnector(VIRTUAL_CONNECTOR_PORT, type);
         if (!peer)
         {
-            oapiWriteLog((char *)"LEMLink: validated, but no "
-                                 "MFD_PANEL_INTERFACE registered yet");
+            log("LEMLink: validated, but no MFD_PANEL_INTERFACE registered yet");
             return false;
         }
         return true;
@@ -213,9 +225,9 @@ public:
      * `guard` stays false. A guarded switch is opened by its own catalogued
      * control here, and LEMBridge's mapping.csv decides that, not this.
      *
-     * Note the return value is close to worthless: PanelSwitches::SetState
-     * returns true for a name it cannot find, and only writes a debug string
-     * (there is a \todo in NASSP about it). Read the item back if it matters.
+     * The return value says little: PanelSwitches::SetState returns true for a
+     * name it cannot find, and only writes a debug string (there is a \todo in
+     * NASSP about it). So the caller asks GetItemState() about the name first.
      */
     bool SetItemState(const char *name, int value, bool hold)
     {
@@ -254,10 +266,14 @@ public:
     void Release() { peer = NULL; }
     bool Available() const { return peer != NULL; }
 
-    /** A whole row of eight C&W lights, two bits each. -1 if unavailable. */
+    /**
+     * A whole row of eight C&W lights, two bits each. -1 if unavailable, or if
+     * it is not one of the five rows: this number comes off the network and
+     * NASSP indexes its table with it unchecked.
+     */
     int CWLightRow(int row)
     {
-        if (!peer)
+        if (!peer || row < 0 || row > 4)
         {
             return -1;
         }
@@ -268,37 +284,44 @@ public:
         return peer->ReceiveMessage(this, cm) ? cm.val1.iValue : -1;
     }
 
-    /** Mission or event timer in seconds, or -1 if unavailable. */
-    double Timer(bool event_timer)
+    /** Mission or event timer in seconds. False if unavailable. */
+    bool Timer(bool event_timer, double *seconds)
     {
         if (!peer)
         {
-            return -1.0;
+            return false;
         }
         ConnectorMessage cm;
         cm.destination = type;
         cm.messageType = event_timer ? LMDD_GET_EVENT_TIMER
                                      : LMDD_GET_MISSION_TIMER;
-        return peer->ReceiveMessage(this, cm) ? cm.val1.dValue : -1.0;
+        if (!peer->ReceiveMessage(this, cm))
+        {
+            return false;
+        }
+        *seconds = cm.val1.dValue;
+        return true;
     }
 
     /**
      * One of the messages that fill a caller-owned struct (lmdd_types.h).
-     * The struct's `size` must already be set. 1 on success, 0 when there is
-     * no display connector at all, -1 when the connector refused the struct -
-     * which means this plugin and LEM.dll were built from different
-     * lmdd_types.h, and is worth saying rather than reading as "no display".
+     * 1 on success, 0 when there is no display connector at all, -1 when the
+     * connector refused the struct - which means this plugin and LEM.dll were
+     * built from different lmdd_types.h, and is worth saying rather than
+     * reading as "no display".
      */
-    int Query(unsigned msg, void *reply)
+    template <class T>
+    int Query(unsigned msg, T &reply)
     {
         if (!peer)
         {
             return 0;
         }
+        reply.size = sizeof(reply);
         ConnectorMessage cm;
         cm.destination = type;
         cm.messageType = msg;
-        cm.val1.pValue = reply;
+        cm.val1.pValue = &reply;
         cm.val2.bValue = false;
         if (!peer->ReceiveMessage(this, cm))
         {
@@ -328,11 +351,11 @@ public:
     }
 
     /**
-     * A continuous knob at full resolution: set it when `set`, then read it.
-     * False when there is no display connector or no continuous knob by that
-     * name; `*value` is the knob's value after the call.
+     * Sets a continuous knob at full resolution. False when there is no
+     * display connector or no continuous knob by that name; `*value` is the
+     * knob's value after the call.
      */
-    bool Knob(const char *name, bool set, double *value)
+    bool SetKnob(const char *name, double *value)
     {
         if (!peer)
         {
@@ -340,7 +363,7 @@ public:
         }
         ConnectorMessage cm;
         cm.destination = type;
-        cm.messageType = set ? LMDD_SET_KNOB : LMDD_GET_KNOB;
+        cm.messageType = LMDD_SET_KNOB;
         cm.val1.pValue = (void *)name;
         cm.val2.bValue = false;
         cm.val3.dValue = *value;
@@ -365,7 +388,7 @@ public:
           next_note(0.0), hVessel(NULL),
           wsaUp(false), announced(false)
     {
-        strcpy(localip, "0.0.0.0");
+        strcpy(localip, "127.0.0.1");
     }
 
     ~LEMLinkModule() { CloseSocket(); }
@@ -402,12 +425,10 @@ private:
 
     bool OpenSocket();
     void CloseSocket();
-    void FindLocalIP();
     void UpdateNote(double simt);
     void Service();
     bool EnsureConnected();
     void HandleLine(char *line, SOCKET s, sockaddr_in *from, int fromlen);
-    void Reply(SOCKET s, sockaddr_in *from, int fromlen, const char *text);
 };
 
 // ---------------------------------------------------------------------------
@@ -443,18 +464,26 @@ LEMLinkModule::OpenSocket()
     u_long nb = 1;
     ioctlsocket(sock, FIONBIO, &nb);
 
-    // 0.0.0.0 so a node or bridge on the LAN reaches us, not only localhost.
+    /*
+     * This machine only, unless $LEMLINK_ADDRESS names another address to listen
+     * on (0.0.0.0 for all of them). Whoever reaches this socket can move every
+     * switch in the LM, so being reachable from the LAN is opted into, for a
+     * bridge on another machine. Panel nodes only ever talk to the bridge.
+     */
+    const char *forced = getenv("LEMLINK_ADDRESS");
+    snprintf(localip, sizeof(localip), "%s", forced && *forced ? forced : "127.0.0.1");
+
     sockaddr_in addr;
     memset(&addr, 0, sizeof(addr));
     addr.sin_family      = AF_INET;
-    addr.sin_addr.s_addr = htonl(INADDR_ANY);
     addr.sin_port        = htons(LEMLINK_PORT);
 
-    if (bind(sock, (sockaddr *)&addr, sizeof(addr)) == SOCKET_ERROR)
+    if (inet_pton(AF_INET, localip, &addr.sin_addr) != 1 ||
+        bind(sock, (sockaddr *)&addr, sizeof(addr)) == SOCKET_ERROR)
     {
         char msg[128];
-        sprintf(msg, "LEMLink: bind to %d failed (%d)",
-                LEMLINK_PORT, WSAGetLastError());
+        snprintf(msg, sizeof(msg), "LEMLink: bind to %s:%d failed (%d)",
+                 localip, LEMLINK_PORT, WSAGetLastError());
         oapiWriteLog(msg);
         closesocket(sock);
         sock = INVALID_SOCKET;
@@ -462,7 +491,7 @@ LEMLinkModule::OpenSocket()
     }
 
     char msg[128];
-    sprintf(msg, "LEMLink: listening on UDP %d", LEMLINK_PORT);
+    snprintf(msg, sizeof(msg), "LEMLink: listening on UDP %s:%d", localip, LEMLINK_PORT);
     oapiWriteLog(msg);
     return true;
 }
@@ -480,76 +509,6 @@ LEMLinkModule::CloseSocket()
         WSACleanup();
         wsaUp = false;
     }
-}
-
-/**
- * The address this Orbiter machine shows for itself: its primary interface.
- *
- * The socket binds 0.0.0.0, which is right but useless to read off a screen,
- * and "whatever reaches the internet" changes the moment a phone tether or a
- * VPN takes the default route. So the label is deterministic instead: the
- * IPv4 address on the lowest-numbered interface that is up, skipping loopback
- * and link-local. Built-in NICs are numbered at boot; anything added later (a
- * USB tether, a VM bridge) gets a higher number. $LEMLINK_ADDRESS overrides it.
- */
-void
-LEMLinkModule::FindLocalIP()
-{
-    strcpy(localip, "0.0.0.0");
-
-    const char *forced = getenv("LEMLINK_ADDRESS");
-    if (forced && *forced)
-    {
-        strncpy(localip, forced, sizeof(localip) - 1);
-        localip[sizeof(localip) - 1] = '\0';
-        return;
-    }
-
-    ULONG size = 16 * 1024;
-    IP_ADAPTER_ADDRESSES *list = NULL;
-    ULONG rc = ERROR_BUFFER_OVERFLOW;
-    for (int tries = 0; tries < 3 && rc == ERROR_BUFFER_OVERFLOW; tries++)
-    {
-        free(list);
-        list = (IP_ADAPTER_ADDRESSES *)malloc(size);
-        if (!list)
-        {
-            return;
-        }
-        rc = GetAdaptersAddresses(AF_INET,
-                                  GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST |
-                                  GAA_FLAG_SKIP_DNS_SERVER, NULL, list, &size);
-    }
-    if (rc == NO_ERROR)
-    {
-        DWORD best = 0xFFFFFFFF;
-        for (IP_ADAPTER_ADDRESSES *a = list; a; a = a->Next)
-        {
-            if (a->OperStatus != IfOperStatusUp ||
-                a->IfType == IF_TYPE_SOFTWARE_LOOPBACK || a->IfIndex >= best)
-            {
-                continue;
-            }
-            for (IP_ADAPTER_UNICAST_ADDRESS *u = a->FirstUnicastAddress; u; u = u->Next)
-            {
-                sockaddr_in *in = (sockaddr_in *)u->Address.lpSockaddr;
-                unsigned long host = ntohl(in->sin_addr.s_addr);
-                if ((host >> 24) == 127 || (host >> 16) == 0xA9FE)   // loopback, 169.254
-                {
-                    continue;
-                }
-                const char *txt = inet_ntoa(in->sin_addr);
-                if (txt)
-                {
-                    strncpy(localip, txt, sizeof(localip) - 1);
-                    localip[sizeof(localip) - 1] = '\0';
-                    best = a->IfIndex;
-                }
-                break;
-            }
-        }
-    }
-    free(list);
 }
 
 /**
@@ -622,13 +581,19 @@ LEMLinkModule::UpdateNote(double simt)
     }
     who[n] = '\0';
 
+    char udp[80] = "BIND FAILED";
+    if (sock != INVALID_SOCKET)
+    {
+        sprintf(udp, "%s:%d", localip, LEMLINK_PORT);
+    }
+
     char text[256];
     sprintf(text,
             "LEMLink\n"
-            "Panel UDP: %s:%d\n"
+            "Panel UDP: %s\n"
             "Telem TCP: %s:%d\n"
             "LEM: %s",
-            localip, LEMLINK_PORT, localip, LEMLINK_TELEM_PORT, who);
+            udp, localip, LEMLINK_TELEM_PORT, who);
     oapiAnnotationSetText(note, text);
 }
 
@@ -642,8 +607,8 @@ LEMLinkModule::clbkSimulationStart(RenderMode mode)
     hVessel   = NULL;
     announced = false;
     next_note = 0.0;
+    panel.logged = false;
     OpenSocket();
-    FindLocalIP();
 
     // Gold, small, top left, and not exclusive - other modules keep theirs.
     note = oapiCreateAnnotation(false, 0.4, _V(1.0, 0.84, 0.0));
@@ -731,7 +696,7 @@ LEMLinkModule::EnsureConnected()
                 // read the way it was assumed to is visible rather than
                 // guessed at.
                 char msg[200];
-                sprintf(msg, "LEMLink:   skip %s (%s)", v->GetName(), cls);
+                snprintf(msg, sizeof(msg), "LEMLink:   skip %s (%s)", v->GetName(), cls);
                 oapiWriteLog(msg);
             }
             continue;
@@ -751,8 +716,8 @@ LEMLinkModule::EnsureConnected()
                   "(see nassp_patch/patch.md)"));
             hVessel = h;
             char msg[200];
-            sprintf(msg, "LEMLink: connected to %s (%s)",
-                    v->GetName(), cls);
+            snprintf(msg, sizeof(msg), "LEMLink: connected to %s (%s)",
+                     v->GetName(), cls);
             oapiWriteLog(msg);
             announced = true;
             return true;
@@ -766,11 +731,15 @@ LEMLinkModule::EnsureConnected()
          * the one LEM.dll was built with. That is the ABI check, and it is
          * silent unless it is said out loud here.
          */
-        char msg[200];
-        sprintf(msg, "LEMLink: %s (%s) is the LM but refused the "
-                     "connector - ABI mismatch or no PanelConnector yet",
-                v->GetName(), cls);
-        oapiWriteLog(msg);
+        if (!panel.logged)
+        {
+            char msg[200];
+            snprintf(msg, sizeof(msg), "LEMLink: %s (%s) is the LM but refused the "
+                                       "connector - ABI mismatch or no PanelConnector yet",
+                     v->GetName(), cls);
+            oapiWriteLog(msg);
+            panel.logged = true;
+        }
         announced = true;
         return false;
     }
@@ -789,27 +758,98 @@ LEMLinkModule::EnsureConnected()
 // ---------------------------------------------------------------------------
 //                                 PROTOCOL
 // ---------------------------------------------------------------------------
-// Line based, one command per line, several lines to a datagram allowed. Kept
-// readable on purpose - the same reason the node protocol is readable, which
-// is that you can reproduce any of it from a terminal while something is
-// broken.
+// One rule for every verb; docs/PROTOCOL.md lists them and what each answers.
 //
-//   S <item> <value>   set a control, answered "K <item> <value>" or "E <item>"
-//   G <item>           read a control, answered "V <item> <value>"
-//   P                  ping, answered "A <vessel>" or "A -" when unconnected
+//   request    <V> [args]              one uppercase letter, then its arguments
+//   success    <request> = <fields>
+//   failure    <request> ! <code>
+//
+// Several requests may share a datagram. Each gets exactly one reply line, in a
+// datagram of its own. Kept readable on purpose: any of it can be reproduced from
+// a terminal while something is broken.
 // ---------------------------------------------------------------------------
 
-void
-LEMLinkModule::Reply(SOCKET s, sockaddr_in *from, int fromlen, const char *text)
+/// P reports this. It changes whenever a verb or the fields of a reply change.
+#define LEMLINK_PROTOCOL 2
+
+/// The longest request. A reply repeats it, and no item name is over 34 characters.
+#define MAX_REQUEST 100
+
+/// How many arguments each verb takes, so that no verb has to check for itself.
+static const struct { char verb; int fewest, most; } VERBS[] = {
+    {'P', 0, 0}, {'S', 2, 3}, {'K', 2, 2}, {'G', 1, 1}, {'N', 1, 1},
+    {'W', 1, 1}, {'T', 1, 1}, {'F', 1, 1}, {'X', 1, 1}, {'A', 1, 2},
+    {'Y', 0, 0}, {'D', 0, 0}, {'B', 0, 0}, {'O', 0, 0}, {'Q', 0, 0},
+    {'I', 0, 0}, {'L', 0, 0}, {'J', 0, 0}, {'C', 0, 0}, {'Z', 0, 0},
+};
+
+/** Where one request's answer goes. Whichever is called starts with the request. */
+class Answer
 {
-    sendto(s, text, (int)strlen(text), 0, (sockaddr *)from, fromlen);
+public:
+    Answer(SOCKET s, const sockaddr_in *from, int fromlen, const char *request)
+        : s(s), from(from), fromlen(fromlen), request(request) {}
+
+    void Ok(const char *format, ...)
+    {
+        char out[512];
+        int n = snprintf(out, sizeof(out), "%s = ", request);
+        va_list fields;
+        va_start(fields, format);
+        vsnprintf(out + n, sizeof(out) - n - 1, format, fields);
+        va_end(fields);
+        Send(strcat(out, "\n"));
+    }
+
+    void Fail(const char *code)
+    {
+        char out[MAX_REQUEST + 40];
+        snprintf(out, sizeof(out), "%s ! %s\n", request, code);
+        Send(out);
+    }
+
+private:
+    SOCKET s;
+    const sockaddr_in *from;
+    int fromlen;
+    const char *request;
+
+    void Send(const char *text)
+    {
+        sendto(s, text, (int)strlen(text), 0, (const sockaddr *)from, fromlen);
+    }
+};
+
+/** A whole number and nothing else. atoi reads "abc" as 0, and that moved a switch. */
+static bool
+WholeNumber(const char *text, long *value, int base = 10)
+{
+    char *end;
+    *value = strtol(text, &end, base);
+    return end != text && !*end;
 }
 
-/*
- * A display string as one wire field. Replies are split on spaces, and a DSKY
- * or DEDA blank digit IS a space, so blanks travel as '_' and an empty string
- * as '-'. The field count of a reply therefore never changes with what the
- * display happens to show.
+/** A selector argument: a whole number from 0 to @p highest. */
+static bool
+Selector(const char *text, long *value, long highest)
+{
+    return WholeNumber(text, value) && *value >= 0 && *value <= highest;
+}
+
+/** A plain decimal number. strtod alone also takes nan, inf and hex, which no knob means. */
+static bool
+Decimal(const char *text, double *value)
+{
+    char *end;
+    *value = strtod(text, &end);
+    return text[strspn(text, "-.0123456789")] == '\0' && end != text && !*end;
+}
+
+/**
+ * A string as one wire field. Replies are split on spaces, and a DSKY or DEDA blank
+ * digit IS a space, so blanks travel as '_' and an empty string as '-'. So does
+ * anything unprintable: a vessel's name comes out of the .scn file and can be any
+ * bytes. The field count of a reply therefore never changes with what it carries.
  */
 static void
 WireText(char *dst, size_t n, const char *src)
@@ -817,7 +857,8 @@ WireText(char *dst, size_t n, const char *src)
     size_t i = 0;
     for (; src[i] && i + 1 < n; i++)
     {
-        dst[i] = (src[i] == ' ') ? '_' : src[i];
+        unsigned char ch = (unsigned char)src[i];
+        dst[i] = (ch > 0x20 && ch < 0x7F) ? (char)ch : '_';
     }
     if (i == 0 && n > 1)
     {
@@ -826,175 +867,267 @@ WireText(char *dst, size_t n, const char *src)
     dst[i] = '\0';
 }
 
+/** One of the display reads that fill a struct. False once it has answered the failure. */
+template <class T>
+static bool
+ReadDisplay(DisplayClient &display, unsigned msg, T &r, Answer &reply)
+{
+    int got = display.Query(msg, r);
+    if (got <= 0)
+    {
+        reply.Fail(got < 0 ? "display-mismatch" : "no-display");
+    }
+    return got > 0;
+}
+
 void
 LEMLinkModule::HandleLine(char *line, SOCKET s, sockaddr_in *from, int fromlen)
 {
-    char out[512];      // the Z reply is about 270 bytes since it carries the rotation
-
-    while (*line == ' ' || *line == '\t')
+    // Both ends trimmed: the reply repeats this, and the bridge looks it up by it.
+    line += strspn(line, " \t");
+    size_t len = strlen(line);
+    while (len && (line[len - 1] == ' ' || line[len - 1] == '\t'))
     {
-        line++;
+        line[--len] = '\0';
     }
-    if (!*line)
+    if (!len)
     {
         return;
     }
 
-    char verb = *line++;
-    while (*line == ' ')
+    char request[MAX_REQUEST + 1];
+    snprintf(request, sizeof(request), "%s", line);
+    Answer reply(s, from, fromlen, request);
+    if (len > MAX_REQUEST)
     {
-        line++;
+        return reply.Fail("bad-args");
     }
 
-    if (verb == 'P')
+    const char *word = strtok(line, " \t");
+    char *arg[3];
+    int nargs = 0;
+    for (char *t; (t = strtok(NULL, " \t")) != NULL; nargs++)
+    {
+        if (nargs < 3)
+        {
+            arg[nargs] = t;
+        }
+    }
+
+    const char verb = word[1] ? '\0' : word[0];
+    int fewest = -1, most = -1;
+    for (const auto &known : VERBS)
+    {
+        if (known.verb == verb)
+        {
+            fewest = known.fewest;
+            most = known.most;
+        }
+    }
+    if (fewest < 0)
+    {
+        return reply.Fail("bad-verb");
+    }
+    if (nargs < fewest || nargs > most)
+    {
+        return reply.Fail("bad-args");
+    }
+    if (verb != 'P' && !EnsureConnected())
+    {
+        return reply.Fail("no-lm");
+    }
+
+    long which;
+    switch (verb)
+    {
+    case 'P':
     {
         EnsureConnected();      // a status verb should answer with the truth
         VESSEL *v = (hVessel && oapiIsVessel(hVessel))
                         ? oapiGetVesselInterface(hVessel) : NULL;
-        sprintf(out, "A %s\n", v ? v->GetName() : "-");
-        Reply(s, from, fromlen, out);
-        return;
+        LMDDLamps probe = {};
+        int got = v ? display.Query(LMDD_GET_PANEL_LAMPS, probe) : 0;
+        char name[64];
+        WireText(name, sizeof(name), v ? v->GetName() : "");
+        return reply.Ok("%d %s %.3f %s", LEMLINK_PROTOCOL,
+                        !v ? "-" : got > 0 ? "patched" : got < 0 ? "mismatch" : "stock",
+                        oapiGetSimTime(), name);
     }
 
-    if (!EnsureConnected())
+    case 'S':
     {
-        Reply(s, from, fromlen, "E no-lm\n");
-        return;
-    }
-
-    // "<item> <value>" - the item name never contains a space.
-    char *sp = strchr(line, ' ');
-    if (sp)
-    {
-        *sp = '\0';
-    }
-
-    // "W <row>"  -> "R <row> <packed>", eight C&W lights, two bits each
-    // "T <0|1>"   -> "M <which> <seconds>", mission or event timer
-    // "N <meter>" -> "U <meter> <value>"
-    if (verb == 'W' || verb == 'T' || verb == 'N')
-    {
-        if (!EnsureConnected() || !display.Available())
+        // NASSP stores whatever it is given, range unchecked, and answers -1 for a
+        // name it cannot find. So a control set to -1 could never be set again.
+        long value, hold = 0;
+        if (!WholeNumber(arg[1], &value) || value < 0 ||
+            (nargs == 3 && !Selector(arg[2], &hold, 1)))
         {
-            Reply(s, from, fromlen, "E no-display\n");
-            return;
+            return reply.Fail("bad-args");
         }
-        if (verb == 'W')
+        if (panel.GetItemState(arg[0]) < 0 ||
+            !panel.SetItemState(arg[0], (int)value, hold != 0))
         {
-            int row = atoi(line);
-            sprintf(out, "R %d %d\n", row, display.CWLightRow(row));
+            return reply.Fail("no-item");
         }
-        else if (verb == 'T')
+        // Read back in the same frame, so a spring or a clamp shows here.
+        return reply.Ok("%d", panel.GetItemState(arg[0]));
+    }
+
+    case 'K':
+    {
+        double value;
+        if (!Decimal(arg[1], &value))
         {
-            int which = atoi(line);
-            sprintf(out, "M %d %.3f\n", which, display.Timer(which != 0));
+            return reply.Fail("bad-args");
+        }
+        if (panel.GetItemState(arg[0]) < 0)
+        {
+            return reply.Fail("no-item");
+        }
+        if (display.Available())
+        {
+            if (!display.SetKnob(arg[0], &value))
+            {
+                return reply.Fail("bad-args");      // it exists, but is not a knob
+            }
         }
         else
         {
-            char *sp2 = strchr(line, ' ');
-            if (sp2) { *sp2 = '\0'; }
-            bool ok = false;
-            double v = display.Meter(line, &ok);
-            if (ok) { sprintf(out, "U %.80s %.4f\n", line, v); }
-            else    { sprintf(out, "E %.80s no-meter\n", line); }
+            // A stock LEM.dll has no full resolution: whole numbers, by the panel.
+            panel.SetItemState(arg[0], value > 0 ? (int)floor(value + 0.5) : 0, false);
+            value = panel.GetItemState(arg[0]);
         }
-        Reply(s, from, fromlen, out);
+        return reply.Ok("%.4f", value);
+    }
+
+    case 'G':
+    {
+        int state = panel.GetItemState(arg[0]);
+        if (state < 0)
+        {
+            return reply.Fail("no-item");
+        }
+        return reply.Ok("%d", state);
+    }
+
+    case 'N':
+    {
+        if (!display.Available())
+        {
+            return reply.Fail("no-display");
+        }
+        bool ok = false;
+        double value = display.Meter(arg[0], &ok);
+        if (!ok)
+        {
+            return reply.Fail("no-item");
+        }
+        return reply.Ok("%.4f", value);
+    }
+
+    case 'W':
+    {
+        if (!Selector(arg[0], &which, 4))
+        {
+            return reply.Fail("bad-args");
+        }
+        int packed = display.CWLightRow((int)which);
+        if (packed < 0)
+        {
+            return reply.Fail("no-display");
+        }
+        return reply.Ok("%x", packed);
+    }
+
+    case 'T':
+    {
+        double seconds;
+        if (!Selector(arg[0], &which, 1))
+        {
+            return reply.Fail("bad-args");
+        }
+        if (!display.Timer(which != 0, &seconds))
+        {
+            return reply.Fail("no-display");
+        }
+        return reply.Ok("%.3f", seconds);
+    }
+
+    case 'F':
+    {
+        if (!Selector(arg[0], &which, 1))
+        {
+            return reply.Fail("bad-args");
+        }
+        LMDDFdai r = {};
+        r.which = (int)which;
+        if (ReadDisplay(display, LMDD_GET_FDAI, r, reply))
+        {
+            reply.Ok("%d %.4f %.4f %.4f %.4f %.4f %.4f %.3f %.3f %.3f",
+                     r.powered, r.rate[0], r.rate[1], r.rate[2],
+                     r.error[0], r.error[1], r.error[2],
+                     r.ball[0], r.ball[1], r.ball[2]);
+        }
         return;
     }
 
-    // Everything else the panel draws, through the patched connector. Each
-    // answers with the lowercase of its own letter, and all of them answer
-    // "E no-display" on stock NASSP, like W/T/N:
-    //
-    //   "F <0|1>" -> "f <which> <powered> <rate r p y> <error r p y> <ball r p y>"
-    //   "X <0|1>" -> "x <which> <powered> <fine> <needle fwd lat> <raw fwd lat>"
-    //   "Y"       -> "y <powered> <monitor> <pfail> <sfail> <tfail>
-    //                   <range_pos> <rate_pos> <range_m> <rate_mps>"
-    //   "D"       -> "d <segpwr> <statpwr> <lamps-hex> <prog> <verb> <noun> <r1> <r2> <r3>"
-    //   "B"       -> "b <powered> <opr_err> <adr> <data>"
-    //   "O"       -> "o <shaft> <dimmer> <counter_deg> <reticle_rad>"
-    //   "Q"       -> "q <lit-hex>", LMDD_LAMP_* bits: contact, component
-    //                caution, stage-seq and power-failure lamps
-    //   "I"       -> "i <imu_pwr> <caged> <gasta_pwr> <imu x y z>
-    //                   <gasta r p y> <ags r p y> <ordeal1> <ordeal2>", degrees
-    //   "L"       -> "l <lit-hex> <numeric>", LMDD_LEGEND_* bits: the legends
-    //                only the VC lights (X-pointer source and scale, tape
-    //                mode, RCS He x10), and the NUM dimmer level they draw at
-    //   "J"       -> "j <integral> <numeric> <anun> <dsky> <flood_cdr>
-    //                   <flood_lmp> <flood_side> <ordeal> <side_8_11>
-    //                   <side_12_14_16>": every lighting channel, 0..1 as the
-    //                VC scales it, and the two side-panel integral switches
-    // "A <octal address> [count]" -> "a <address> <word> ...", octal: LGC
-    // erasable memory, read-only (patch only). See LMDDErasable.
-    if (verb == 'A')
+    case 'X':
     {
-        LMDDErasable r;
-        memset(&r, 0, sizeof(r));
-        r.size = sizeof(r);
-        // The dispatcher has already cut the line at its first space (`sp`),
-        // so the address is in `line` and the count, if any, follows `sp`.
-        r.address = (int)strtol(line, NULL, 8);
-        r.count = sp ? atoi(sp + 1) : 1;
-        int got = display.Query(LMDD_GET_ERASABLE, &r);
-        if (got > 0)
+        if (!Selector(arg[0], &which, 1))
         {
-            int n = sprintf(out, "a %o", r.address);
-            for (int i = 0; i < r.count && i < 16; i++)
-                n += sprintf(out + n, " %o", r.words[i]);
-            sprintf(out + n, "\n");
-            Reply(s, from, fromlen, out);
+            return reply.Fail("bad-args");
         }
-        else
+        LMDDXPointer r = {};
+        r.which = (int)which;
+        if (ReadDisplay(display, LMDD_GET_XPOINTER, r, reply))
         {
-            Reply(s, from, fromlen, got < 0 ? "E display-mismatch\n" : "E no-display\n");
+            reply.Ok("%d %d %.4f %.4f %.4f %.4f", r.powered, r.fine,
+                     r.needle[0], r.needle[1], r.raw[0], r.raw[1]);
         }
         return;
     }
 
-    if (verb == 'F' || verb == 'X' || verb == 'Y' ||
-        verb == 'D' || verb == 'B' || verb == 'O' || verb == 'Q' ||
-        verb == 'I' || verb == 'L' || verb == 'J')
+    case 'A':
     {
-        int which = atoi(line) != 0 ? 1 : 0;
-        int got = 0;
-        if (verb == 'F')
+        long address, count = 1;
+        if (!WholeNumber(arg[0], &address, 8) || address < 0 || address > 03777 ||
+            (nargs == 2 && (!WholeNumber(arg[1], &count) || count < 1 || count > 16)))
         {
-            LMDDFdai r;
-            memset(&r, 0, sizeof(r));
-            r.size = sizeof(r);
-            r.which = which;
-            got = display.Query(LMDD_GET_FDAI, &r);
-            sprintf(out, "f %d %d %.4f %.4f %.4f %.4f %.4f %.4f %.3f %.3f %.3f\n",
-                    which, r.powered, r.rate[0], r.rate[1], r.rate[2],
-                    r.error[0], r.error[1], r.error[2],
-                    r.ball[0], r.ball[1], r.ball[2]);
+            return reply.Fail("bad-args");
         }
-        else if (verb == 'X')
+        LMDDErasable r = {};
+        r.address = (int)address;
+        r.count = (int)count;
+        if (ReadDisplay(display, LMDD_GET_ERASABLE, r, reply))
         {
-            LMDDXPointer r;
-            memset(&r, 0, sizeof(r));
-            r.size = sizeof(r);
-            r.which = which;
-            got = display.Query(LMDD_GET_XPOINTER, &r);
-            sprintf(out, "x %d %d %d %.4f %.4f %.4f %.4f\n", which, r.powered,
-                    r.fine, r.needle[0], r.needle[1], r.raw[0], r.raw[1]);
+            char words[16 * 7 + 1];
+            int n = 0;
+            for (int i = 0; i < count; i++)
+            {
+                n += sprintf(words + n, i ? " %o" : "%o", r.words[i]);
+            }
+            reply.Ok("%s", words);
         }
-        else if (verb == 'Y')
+        return;
+    }
+
+    case 'Y':
+    {
+        LMDDTape r = {};
+        if (ReadDisplay(display, LMDD_GET_TAPE, r, reply))
         {
-            LMDDTape r;
-            memset(&r, 0, sizeof(r));
-            r.size = sizeof(r);
-            got = display.Query(LMDD_GET_TAPE, &r);
-            sprintf(out, "y %d %d %d %d %d %.2f %.2f %.3f %.4f\n", r.powered,
-                    r.monitor_on, r.power_fail, r.signal_fail, r.timing_fail,
-                    r.range_pos, r.rate_pos, r.range_m, r.rate_mps);
+            reply.Ok("%d %d %d %d %d %.2f %.2f %.3f %.4f", r.powered,
+                     r.monitor_on, r.power_fail, r.signal_fail, r.timing_fail,
+                     r.range_pos, r.rate_pos, r.range_m, r.rate_mps);
         }
-        else if (verb == 'D')
+        return;
+    }
+
+    case 'D':
+    {
+        LMDDDsky r = {};
+        if (ReadDisplay(display, LMDD_GET_DSKY, r, reply))
         {
-            LMDDDsky r;
-            memset(&r, 0, sizeof(r));
-            r.size = sizeof(r);
-            got = display.Query(LMDD_GET_DSKY, &r);
             char pg[8], vb[8], nn[8], a1[12], a2[12], a3[12];
             WireText(pg, sizeof(pg), r.prog);
             WireText(vb, sizeof(vb), r.verb);
@@ -1002,94 +1135,86 @@ LEMLinkModule::HandleLine(char *line, SOCKET s, sockaddr_in *from, int fromlen)
             WireText(a1, sizeof(a1), r.r1);
             WireText(a2, sizeof(a2), r.r2);
             WireText(a3, sizeof(a3), r.r3);
-            sprintf(out, "d %d %d %x %s %s %s %s %s %s\n", r.segment_power,
-                    r.status_power, r.lamps, pg, vb, nn, a1, a2, a3);
-        }
-        else if (verb == 'B')
-        {
-            LMDDDeda r;
-            memset(&r, 0, sizeof(r));
-            r.size = sizeof(r);
-            got = display.Query(LMDD_GET_DEDA, &r);
-            char ad[8], da[12];
-            WireText(ad, sizeof(ad), r.adr);
-            WireText(da, sizeof(da), r.data);
-            sprintf(out, "b %d %d %s %s\n", r.powered, r.opr_err, ad, da);
-        }
-        else if (verb == 'Q')
-        {
-            LMDDLamps r;
-            memset(&r, 0, sizeof(r));
-            r.size = sizeof(r);
-            got = display.Query(LMDD_GET_PANEL_LAMPS, &r);
-            sprintf(out, "q %x\n", r.lit);
-        }
-        else if (verb == 'L')
-        {
-            LMDDLegends r;
-            memset(&r, 0, sizeof(r));
-            r.size = sizeof(r);
-            got = display.Query(LMDD_GET_VC_LEGENDS, &r);
-            sprintf(out, "l %x %.3f\n", r.lit, r.numeric);
-        }
-        else if (verb == 'J')
-        {
-            LMDDLighting r;
-            memset(&r, 0, sizeof(r));
-            r.size = sizeof(r);
-            got = display.Query(LMDD_GET_LIGHTING, &r);
-            sprintf(out, "j %.3f %.3f %.3f %.3f %.3f %.3f %.3f %.3f %d %d\n",
-                    r.integral, r.numeric, r.anun, r.dsky, r.flood_cdr,
-                    r.flood_lmp, r.flood_side, r.ordeal, r.side_8_11,
-                    r.side_12_14_16);
-        }
-        else if (verb == 'I')
-        {
-            LMDDAttitude r;
-            memset(&r, 0, sizeof(r));
-            r.size = sizeof(r);
-            got = display.Query(LMDD_GET_ATTITUDE, &r);
-            sprintf(out, "i %d %d %d %.3f %.3f %.3f %.3f %.3f %.3f %.3f %.3f %.3f %.3f %.3f\n",
-                    r.imu_powered, r.imu_caged, r.gasta_powered,
-                    r.imu[0], r.imu[1], r.imu[2], r.gasta[0], r.gasta[1], r.gasta[2],
-                    r.ags[0], r.ags[1], r.ags[2], r.ordeal_pitch[0], r.ordeal_pitch[1]);
-        }
-        else
-        {
-            LMDDAot r;
-            memset(&r, 0, sizeof(r));
-            r.size = sizeof(r);
-            got = display.Query(LMDD_GET_AOT, &r);
-            sprintf(out, "o %d %d %.3f %.6f\n", r.shaft, r.dimmer,
-                    r.counter_deg, r.reticle_rad);
-        }
-        if (got == 0)
-        {
-            Reply(s, from, fromlen, "E no-display\n");
-        }
-        else if (got < 0)
-        {
-            Reply(s, from, fromlen, "E display-mismatch\n");
-        }
-        else
-        {
-            Reply(s, from, fromlen, out);
+            reply.Ok("%d %d %x %s %s %s %s %s %s", r.segment_power,
+                     r.status_power, r.lamps, pg, vb, nn, a1, a2, a3);
         }
         return;
     }
 
-    // "C" -> ground truth for the rendezvous radar: the nearest Apollo CSM
-    // (a vessel whose class is ProjectApollo's Saturn), relative to the LM,
-    // in Orbiter's global frame. lm_rr.cpp measures exactly these: range is
-    // |pos| and range rate is vel along pos, while the radar holds lock.
-    //
-    //   "c <name> <pos x y z> <vel x y z>"    metres and m/s, CSM minus LM
-    //   "c - 0 0 0 0 0 0"                     no CSM in the scenario
-    //
-    // Needs no patch. NASSP's own target is LEM::agc.GetCSM(), which this
-    // cannot see; with one CSM in a scenario they are the same vessel.
-    if (verb == 'C')
+    case 'B':
     {
+        LMDDDeda r = {};
+        if (ReadDisplay(display, LMDD_GET_DEDA, r, reply))
+        {
+            char ad[8], da[12];
+            WireText(ad, sizeof(ad), r.adr);
+            WireText(da, sizeof(da), r.data);
+            reply.Ok("%d %d %s %s", r.powered, r.opr_err, ad, da);
+        }
+        return;
+    }
+
+    case 'O':
+    {
+        LMDDAot r = {};
+        if (ReadDisplay(display, LMDD_GET_AOT, r, reply))
+        {
+            reply.Ok("%d %d %.3f %.6f", r.shaft, r.dimmer,
+                     r.counter_deg, r.reticle_rad);
+        }
+        return;
+    }
+
+    case 'Q':
+    {
+        LMDDLamps r = {};
+        if (ReadDisplay(display, LMDD_GET_PANEL_LAMPS, r, reply))
+        {
+            reply.Ok("%x", r.lit);
+        }
+        return;
+    }
+
+    case 'I':
+    {
+        LMDDAttitude r = {};
+        if (ReadDisplay(display, LMDD_GET_ATTITUDE, r, reply))
+        {
+            reply.Ok("%d %d %d %.3f %.3f %.3f %.3f %.3f %.3f %.3f %.3f %.3f %.3f %.3f",
+                     r.imu_powered, r.imu_caged, r.gasta_powered,
+                     r.imu[0], r.imu[1], r.imu[2], r.gasta[0], r.gasta[1], r.gasta[2],
+                     r.ags[0], r.ags[1], r.ags[2], r.ordeal_pitch[0], r.ordeal_pitch[1]);
+        }
+        return;
+    }
+
+    case 'L':
+    {
+        LMDDLegends r = {};
+        if (ReadDisplay(display, LMDD_GET_VC_LEGENDS, r, reply))
+        {
+            reply.Ok("%x %.3f", r.lit, r.numeric);
+        }
+        return;
+    }
+
+    case 'J':
+    {
+        LMDDLighting r = {};
+        if (ReadDisplay(display, LMDD_GET_LIGHTING, r, reply))
+        {
+            reply.Ok("%.3f %.3f %.3f %.3f %.3f %.3f %.3f %.3f %d %d",
+                     r.integral, r.numeric, r.anun, r.dsky, r.flood_cdr,
+                     r.flood_lmp, r.flood_side, r.ordeal, r.side_8_11,
+                     r.side_12_14_16);
+        }
+        return;
+    }
+
+    case 'C':
+    {
+        // Needs no patch. NASSP's own target is LEM::agc.GetCSM(), which this cannot
+        // see; with one CSM in a scenario they are the same vessel.
         VESSEL *v = oapiGetVesselInterface(hVessel);
         VECTOR3 lp, lv;
         v->GetGlobalPos(lp);
@@ -1116,45 +1241,23 @@ LEMLinkModule::HandleLine(char *line, SOCKET s, sockaddr_in *from, int fromlen)
         }
         if (!best)
         {
-            Reply(s, from, fromlen, "c - 0 0 0 0 0 0\n");
-            return;
+            return reply.Fail("no-csm");
         }
         VECTOR3 op, ov;
         best->GetGlobalPos(op);
         best->GetGlobalVel(ov);
         op = op - lp;
         ov = ov - lv;
-        // One whitespace-free printable token, so the reply splits on spaces.
         char name[64];
-        const char *src = best->GetName();
-        size_t n = 0;
-        for (size_t i = 0; src && src[i] && n < sizeof(name) - 1; i++)
-        {
-            unsigned char ch = (unsigned char)src[i];
-            name[n++] = (ch > 0x20 && ch < 0x7F) ? (char)ch : '_';
-        }
-        name[n] = '\0';
-        if (n == 0)
-            strcpy(name, "_");
-        sprintf(out, "c %s %.2f %.2f %.2f %.4f %.4f %.4f\n",
-                name, op.x, op.y, op.z, ov.x, ov.y, ov.z);
-        Reply(s, from, fromlen, out);
-        return;
+        WireText(name, sizeof(name), best->GetName());
+        return reply.Ok("%s %.2f %.2f %.2f %.4f %.4f %.4f",
+                        name, op.x, op.y, op.z, ov.x, ov.y, ov.z);
     }
 
-    // "Z" -> ground truth for the LM, from Orbiter itself and not from NASSP,
-    // so a recorded instrument can be judged against the actual vehicle
-    // rather than against itself. Needs no patch; works on stock NASSP.
-    //
-    //   "z <simt> <alt_ground> <alt_meanrad> <vspeed>
-    //      <gs_local x y z> <angvel x y z> <pitch> <bank> <yaw>
-    //      <thrust_N> <mass_kg>"
-    //
-    // Metres, m/s, rad and rad/s. Local-frame vectors are Orbiter's vessel
-    // frame (left-handed: x right, y up, z forward); the vertical speed is the
-    // horizon frame's y.
-    if (verb == 'Z')
+    case 'Z':
     {
+        // From Orbiter itself, not NASSP, so a recorded instrument can be judged
+        // against the actual vehicle. Needs no patch.
         VESSEL *v = oapiGetVesselInterface(hVessel);
         VECTOR3 hz = _V(0, 0, 0), gs = _V(0, 0, 0), w = _V(0, 0, 0),
                 th = _V(0, 0, 0), pos = _V(0, 0, 0);
@@ -1163,76 +1266,28 @@ LEMLinkModule::HandleLine(char *line, SOCKET s, sockaddr_in *from, int fromlen)
         v->GetGroundspeedVector(FRAME_LOCAL, gs);
         v->GetAngularVel(w);
         v->GetThrustVector(th);
-        // The vessel-to-global rotation the IMU itself reads
-        // (IMU::Timestep), and the position from the gravity reference,
-        // so a recording can recover the platform's orientation in space.
+        // The vessel-to-global rotation the IMU itself reads (IMU::Timestep), and
+        // the position from the gravity reference, so a recording can recover the
+        // platform's orientation in space.
         v->GetRotationMatrix(rot);
         OBJHANDLE ref = v->GetGravityRef();
         if (ref)
             v->GetRelativePos(ref, pos);
-        sprintf(out, "z %.3f %.2f %.2f %.3f %.3f %.3f %.3f %.5f %.5f %.5f "
-                     "%.5f %.5f %.5f %.1f %.1f "
-                     "%.7f %.7f %.7f %.7f %.7f %.7f %.7f %.7f %.7f "
-                     "%.1f %.1f %.1f\n",
-                oapiGetSimTime(), v->GetAltitude(ALTMODE_GROUND),
-                v->GetAltitude(ALTMODE_MEANRAD), hz.y, gs.x, gs.y, gs.z,
-                w.x, w.y, w.z, v->GetPitch(), v->GetBank(), v->GetYaw(),
-                length(th), v->GetMass(),
-                rot.m11, rot.m12, rot.m13, rot.m21, rot.m22, rot.m23,
-                rot.m31, rot.m32, rot.m33, pos.x, pos.y, pos.z);
-        Reply(s, from, fromlen, out);
-        return;
+        return reply.Ok("%.3f %.2f %.2f %.3f %.3f %.3f %.3f %.5f %.5f %.5f "
+                        "%.5f %.5f %.5f %.1f %.1f "
+                        "%.7f %.7f %.7f %.7f %.7f %.7f %.7f %.7f %.7f "
+                        "%.1f %.1f %.1f",
+                        oapiGetSimTime(), v->GetAltitude(ALTMODE_GROUND),
+                        v->GetAltitude(ALTMODE_MEANRAD), hz.y, gs.x, gs.y, gs.z,
+                        w.x, w.y, w.z, v->GetPitch(), v->GetBank(), v->GetYaw(),
+                        length(th), v->GetMass(),
+                        rot.m11, rot.m12, rot.m13, rot.m21, rot.m22, rot.m23,
+                        rot.m31, rot.m32, rot.m33, pos.x, pos.y, pos.z);
     }
 
-    if (verb == 'G')
-    {
-        int state = panel.GetItemState(line);
-        sprintf(out, "V %.80s %d\n", line, state);
-        Reply(s, from, fromlen, out);
-        return;
+    default:
+        return reply.Fail("bad-verb");      // in VERBS, with no case here
     }
-
-    if (verb == 'S')
-    {
-        if (!sp)
-        {
-            sprintf(out, "E %.80s no-value\n", line);
-            Reply(s, from, fromlen, out);
-            return;
-        }
-        // "S <item> <value> [hold]". The hold field is optional so a hand-typed
-        // command still works; the bridge sets it for momentary controls.
-        int  value = atoi(sp + 1);
-        bool hold  = false;
-        char *sp2  = strchr(sp + 1, ' ');
-        if (sp2)
-        {
-            hold = (atoi(sp2 + 1) != 0);
-        }
-        // "S <item> 3.25": a value with a decimal point is for a continuous
-        // knob, set at full resolution through the patch (LMDD_SET_KNOB) and
-        // answered with the value read back. On a stock LEM.dll, or for an
-        // item that is not a continuous knob, it is rounded and set below.
-        char *dot = strchr(sp + 1, '.');
-        if (dot && (!sp2 || dot < sp2))
-        {
-            double knob = atof(sp + 1);
-            if (display.Available() && display.Knob(line, true, &knob))
-            {
-                sprintf(out, "K %.80s %.4f\n", line, knob);
-                Reply(s, from, fromlen, out);
-                return;
-            }
-            value = (int)floor(atof(sp + 1) + 0.5);
-        }
-        bool ok = panel.SetItemState(line, value, hold);
-        sprintf(out, ok ? "K %.80s %d\n" : "E %.80s\n", line, value);
-        Reply(s, from, fromlen, out);
-        return;
-    }
-
-    sprintf(out, "E bad-verb %c\n", verb);
-    Reply(s, from, fromlen, out);
 }
 
 void

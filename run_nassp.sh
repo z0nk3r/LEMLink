@@ -51,6 +51,11 @@ if [ "${1:-}" = "-l" ]; then
     exit 0
 fi
 
+# One sim at a time: a second one cannot get LEMLink's port, and it would blank
+# the running one's Orbiter.log. By process name, because pgrep -f also matches
+# any shell command that merely mentions Orbiter.exe.
+running=$(pgrep -x Orbiter.exe) && die "Orbiter is already running (pid $running)"
+
 if [ "${1:-}" = "-p" ]; then
     # Settings and scenario picking. Launching a second scenario from the
     # launchpad after quitting one is the crash noted below, so quit Orbiter
@@ -85,7 +90,7 @@ for _ in $(seq 1 40); do
     sleep 2
 done
 grep -aq "Finished initialising panels" Orbiter.log 2>/dev/null \
-    || die "panels never came up; see $ORBITER/Orbiter.log"
+    || die "panels never came up, and Orbiter is still running (pid $pid); see $ORBITER/Orbiter.log"
 
 grep -a "LEMLink:" Orbiter.log | sed 's/^/  /'
 echo "run_nassp: up, pid $pid"

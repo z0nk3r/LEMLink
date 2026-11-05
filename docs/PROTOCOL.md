@@ -72,6 +72,12 @@ rest position, and the bridge commands it. The reply is the control's state in t
 frame, so a clamp or a spring shows. NASSP does not check a toggle or breaker's range:
 it stores and reports whatever it is given.
 
+**`RadarSlewSwitch2`** is the second contact of a diagonal on RR SLEW. It exists only on
+a patched `LEM.dll`, and a stock one answers `no-item`. It takes `RadarSlewSwitch`'s
+position numbers, 0 down, 1 centre, 2 up, 3 left, 4 right, and the radar moves for both
+items at full rate. It rests at 1 until told otherwise, so it needs no `hold`. It makes no
+sound, draws nothing and is not saved in a scenario.
+
 **`K`** takes a decimal number, a minus sign and a point allowed, no exponent. It goes
 through the same path as a mouse drag, clamped at the knob's ends. An item that exists
 but is not a continuous knob is `bad-args`. On a stock `LEM.dll` the knob takes whole

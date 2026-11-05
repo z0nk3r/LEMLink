@@ -65,6 +65,7 @@ sources are ISO-8859), and a CRLF tree is refused rather than half-matched.
 | `src_lm/lemswitches.h` | friendship in `EngineStartButton`, so `LMDD_GET_PANEL_LAMPS` reports its lamp (bit 25) through its own `LightLogic()` |
 | `src_lm/lemvc.cpp`, `LEM.h` | `LEM::GetVCLegendBits()`, generated and appended to `lemvc.cpp` (where the `VC_MAT_` ids are in scope): the legend block of `clbkVCRedrawEvent` copied whole, run against a local `SetVCLighting` that records a bit per material, with `XP_LIT_ON`/`XP_LIT_OFF` redefined to 1 and 0. The script refuses the block if it holds any statement but a legend call, or lights a set of materials other than `LEGENDS`, since the copy executes inside the connector. Answers `LMDD_GET_VC_LEGENDS` (LEMLink `L`) |
 | `src_lm/lemswitches.cpp`, `lm_eps.cpp` | talkbacks read as drawn: `LEMRCSQuadTalkback` and `RecorderTalkback::GetState()` return `failOpen ? 1 : 0` with their breaker dead, as `DrawSwitch` draws, and DES BATS' state is gated on `EPS_DISP_CB` where `lm_eps.cpp` sets it. Without it, `G` on the 8 quads, RECORDER and DES BATS answers the logic state while NASSP draws the unpowered face. Drawing is unchanged |
+| `src_lm/lemswitches.h`, `LEM.h`, `lempanel.cpp`, `lm_rr.cpp` | RR SLEW diagonals: `RadarSlewSwitch2`, a panel item with a name and a state and nothing else, in `RadarSlewSwitch`'s row, which `LEM_RR` reads with the same position numbers. A stock DLL has no such item, so `S` to it is refused and nothing moves |
 | `src_lm/lemvc.cpp` (checked, not edited) | `LMDD_GET_LIGHTING` restates how the VC's `AID_LMVC_LIGHTING` case scales each lighting channel, because that case lights meshes and cannot be run; `check_lighting_sources()` stops the patch if any expression it mirrors (`LIGHTING_SOURCES`) is gone from that case |
 
 **The FDAI edit is the one that changes NASSP code.** The 2D panel and the VC
@@ -139,7 +140,7 @@ display" instead of a buffer overrun.
   builds and reach `LEM` members by offset. A member added mid-class moves
   every later one, and the Apollo 5 uplink (`MCC::LM_uplink`, a `memcpy` into
   `lm->PCM.mcc_data`) then writes 2 KB at the wrong offset and crashes in
-  `vcruntime140`. So: the one data member goes last in `LEM` (only `LEM.dll` ever
+  `vcruntime140`. So: the two data members go last in `LEM` (only `LEM.dll` ever
   constructs one), every other edit is a method, a friend or an appended enum
   value, and the ABORT fix overrides an existing virtual rather than adding
   one (the original `SwitchTo(int)` was not virtual).

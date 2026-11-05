@@ -14,6 +14,7 @@ import time
 PROTOCOL = 2
 TOGGLE = "LeftXPointerSwitch"
 SPRING = "ORDEALSlewSwitch"
+SLEW2 = "RadarSlewSwitch2"
 KNOBS = ("FloodRotary", "LtgAnunNumKnob", "LtgFloodOhdFwdKnob", "LtgIntegralKnob",
          "ORDEALAltSetRotary", "Panel12AntPitchKnob", "Panel12AntYawKnob")
 
@@ -152,6 +153,14 @@ def displays(patched):
         else:
             check(request, answer, ("!", ["no-display"]))
     refused("N NoSuchMeter", "no-item" if patched else "no-display")
+
+    if patched:
+        check("second slew contact rests at centre", state(SLEW2), 1)
+        check("and stays without a hold", one(f"S {SLEW2} 4"), ("=", ["4"]))
+        check("still there a frame later", state(SLEW2), 4)
+        check("released", one(f"S {SLEW2} 1"), ("=", ["1"]))
+    else:
+        refused(f"S {SLEW2} 4", "no-item")
 
     z = one("Z")
     check("Z fields", z and (z[0], len(z[1])), ("=", 27))

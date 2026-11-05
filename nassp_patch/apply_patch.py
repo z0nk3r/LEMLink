@@ -631,6 +631,37 @@ ContinuousSwitch *PanelSwitches::GetContinuousByName(const char *n)
               "\tif (DFR && lem->drb.GetDeadFaceRelay() && lem->EPS_DISP_CB.Voltage() > SP_MIN_DCVOLTAGE) // LEMLINK LOCAL PATCH: as drawn",
               "DES BATS talkback power check")
 
+    # 7j. RR SLEW diagonals. A panel item holds one state and each state moves
+    # one axis, and alternating through S clicks on every swap at half the rate.
+    # So the second contact of a diagonal is a second item, which LEM_RR reads
+    # with the same position numbers. It is in RadarSlewSwitchRow, whose draw and
+    # mouse loops call it and get nothing. PanelSwitchItem::SetState plays no
+    # sound, and it never registers with PSH, so no scenario carries it.
+    p.replace("src_lm/lemswitches.h", "class LMAbortStageButton : public GuardedPushSwitch {",
+              "// LEMLINK LOCAL PATCH: the second contact of RR SLEW, a name and a state only.\n"
+              "class RadarSlewContact2 : public PanelSwitchItem {\n"
+              "public:\n"
+              "\tRadarSlewContact2() { name = (char *)\"RadarSlewSwitch2\"; state = FIVEPOSSWITCH_CENTER; }\n"
+              "\tbool CheckMouseClick(int event, int mx, int my) { return false; }\n"
+              "\tvoid DrawSwitch(SURFHANDLE DrawSurface) {}\n"
+              "\tvoid SaveState(FILEHANDLE scn) {}\n"
+              "\tvoid LoadState(char *line) {}\n"
+              "};\n\n"
+              "class LMAbortStageButton : public GuardedPushSwitch {",
+              "RadarSlewContact2 class")
+    p.after(lem_h, "\tLEMDisplayDataConnector displayDataConnector;\n",
+            "\tRadarSlewContact2 RadarSlewSwitch2;\n",
+            "RadarSlewSwitch2 member, after the connector at the end of class LEM")
+    p.after("src_lm/lempanel.cpp",
+            "\tRadarSlewSwitch.Init(0, 0, 39, 39, srf[SRF_FIVE_POS_SWITCH], NULL, RadarSlewSwitchRow);\n",
+            "\tRadarSlewSwitchRow.AddSwitch(&RadarSlewSwitch2);   // LEMLINK LOCAL PATCH\n",
+            "RadarSlewSwitch2 in its row")
+    for pos in (4, 3, 2, 0):
+        test = f"lem->RadarSlewSwitch.GetState() == {pos}"
+        p.replace("src_lm/lm_rr.cpp", f"if ({test})",
+                  f"if ({test} || lem->RadarSlewSwitch2.GetState() == {pos})",
+                  f"RR slew position {pos}")
+
     # 8. Build the new source.
     p.after("Project/LEM/CMakeLists.txt",
             "    ${NASSP_SOURCE_ROOT}/src_lm/lemconnector.cpp\n",
